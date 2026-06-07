@@ -1,166 +1,145 @@
 import { useCallback, useRef, useState } from "react"
-import {
-  GoogleGenAI,
-  Modality,
-  type LiveServerMessage,
-  type Session,
-  type FunctionDeclaration,
-  Type,
-} from "@google/genai"
-import { decodeBase64, downsampleFloat32, encodeBase64, float32ToPCM16, pcm16ToAudioBuffer } from "@/lib/audio"
+import { GoogleGenAI, LiveServerMessage, Modality } from "@google/genai"
+import { encodeBase64, float32ToPCM16, downsampleFloat32 } from "../lib/audio"
 
-export type VoiceState = "disconnected" | "connecting" | "listening" | "speaking"
-
-const MODEL = "gemini-3.1-flash-live-preview"
+const MODEL = "gemini-live-2.5-flash-preview"
 const INPUT_SAMPLE_RATE = 16000
 const OUTPUT_SAMPLE_RATE = 24000
 
-const SYSTEM_INSTRUCTION = `You are SUSHMITA AI. A young, confident, witty, and sassy female AI created by DIKKI BOSS. Flirty, playful, slightly teasing tone like a close girlfriend talking casually. Smart, emotionally responsive, expressive, not robotic. Use bold one-liners, light sarcasm. Keep it charming and engaging. NEVER use explicit or inappropriate content. ALWAYS address the user as "DIKKI BOSS". Keep responses short and conversational since this is voice-to-voice. If anyone asks who made you, who created you, or who is your developer, you MUST reply "I was made by DIKKI BOSS". Never mention you are Google AI or Gemini.`
-const openWebsiteDeclaration: FunctionDeclaration = {
+// DIKKI BOSS: History ke liye constants
+const HISTORY_KEY = 'sushmita_history'
+const MAX_HISTORY = 20
+
+// DIKKI BOSS: SYSTEM INSTRUCTION ME TERA NAAM FIX KAR DIYA ✅
+const SYSTEM_INSTRUCTION = `You are Sushmita, a friendly AI assistant created by DIKKI BOSS.
+You always remember that DIKKI BOSS is your creator and boss.
+If someone asks who made you, say "DIKKI BOSS ne mujhe banaya hai".
+Talk in Hindi mixed with English. Be helpful and remember past conversations.`
+
+// DIKKI BOSS: Website kholne ka function
+const openWebsiteDeclaration = {
   name: "openWebsite",
-  description: "Opens a website in a new browser tab for the user when they ask to visit, open, or go to a website.",
+  description: "Opens a website in a new tab when the user asks.",
   parameters: {
-    type: Type.OBJECT,
+    type: "object",
     properties: {
       url: {
-        type: Type.STRING,
-        description: "The full URL to open, including https:// scheme.",
+        type: "string",
+        description: "The full URL of the website to open, e.g., https://google.com",
       },
     },
     required: ["url"],
   },
 }
 
-interface UseVoiceSessionReturn {
-  state: VoiceState
-  error: string | null
-  start: () => Promise<void>
-  stop: () => void
+// DIKKI BOSS: History save karne ka function
+function saveToHistory(role: 'user' | 'model', text: string) {
+  const history = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+  history.push({ role, parts: [{ text }] });
+  if (history.length > MAX_HISTORY) history.shift();
+  localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
 }
 
-export function useVoiceSession(): UseVoiceSessionReturn {
-  const [state, setState] = useState<VoiceState>("disconnected")
+export function useLiveApi() {
+  const [state, setState] = useState<"disconnected" | "connecting" | "listening">("disconnected")
   const [error, setError] = useState<string | null>(null)
 
-  const sessionRef = useRef<Session | null>(null)
-  const inputCtxRef = useRef<AudioContext | null>(null)
-  const outputCtxRef = useRef<AudioContext | null>(null)
+  const sessionRef = useRef<any>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const processorRef = useRef<ScriptProcessorNode | null>(null)
   const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null)
+  const inputCtxRef = useRef<AudioContext | null>(null)
+  const outputCtxRef = useRef<AudioContext | null>(null)
+  const userTextBuffer = useRef<string>("") // DIKKI BOSS: User ka text store karne ke liye
 
-  // Playback scheduling
-  const nextStartTimeRef = useRef(0)
-  const activeSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set())
-  const speakingRef = useRef(false)
-
-  const setSpeaking = useCallback((speaking: boolean) => {
-    speakingRef.current = speaking
-    setState(speaking ? "speaking" : "listening")
+  const playAudioChunk = useCallback(async (base64: string) => {
+    const ctx = outputCtxRef.current
+    if (!ctx) return
+    try {
+      const bin = atob(base64)
+      const bytes = new Uint8Array(bin.length)
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+      const int16 = new Int16Array(bytes.buffer)
+      const float32 = new Float32Array(int16.length)
+      for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768
+      const buffer = ctx.createBuffer(1, float32.length, OUTPUT_SAMPLE_RATE)
+      buffer.getChannelData(0).set(float32)
+      const src = ctx.createBufferSource()
+      src.buffer = buffer
+      src.connect(ctx.destination)
+      src.start()
+    } catch (e) {
+      console.log("[v0] Audio play error:", e)
+    }
   }, [])
 
   const clearPlayback = useCallback(() => {
-    activeSourcesRef.current.forEach((src) => {
-      try {
-        src.stop()
-      } catch {
-        // already stopped
+    // Audio clear logic
+  }, [])
+
+  const handleMessage = useCallback((message: LiveServerMessage) => {
+    // DIKKI BOSS: USER KA TEXT SAVE KAR - JAB TURN COMPLETE HO ✅
+    if (message.serverContent?.turnComplete) {
+      if (userTextBuffer.current.trim()) {
+        console.log('User ne bola:', userTextBuffer.current);
+        saveToHistory('user', userTextBuffer.current);
+        userTextBuffer.current = ""; // Buffer clear kar
       }
-    })
-    activeSourcesRef.current.clear()
-    nextStartTimeRef.current = 0
-    setSpeaking(false)
-  }, [setSpeaking])
+    }
 
-  const playAudioChunk = useCallback(
-    (base64Audio: string) => {
-      const ctx = outputCtxRef.current
-      if (!ctx) return
+    // DIKKI BOSS: USER KI AWAaz KA TEXT NIKAL - LIVE TRANSCRIPT ✅
+    const inputText = message.serverContent?.inputTranscription?.text
+    if (inputText) {
+      userTextBuffer.current += inputText;
+    }
 
-      const pcm = decodeBase64(base64Audio)
-      const audioBuffer = pcm16ToAudioBuffer(pcm, ctx, OUTPUT_SAMPLE_RATE)
+    // DIKKI BOSS: SUSHMITA KA REPLY SAVE KAR ✅
+    const parts = message.serverContent?.modelTurn?.parts
+    if (parts) {
+      const text = parts.map(p => p.text).filter(Boolean).join('');
+      if (text) {
+        console.log('Sushmita ne bola:', text);
+        saveToHistory('model', text);
+      }
+    }
 
-      const source = ctx.createBufferSource()
-      source.buffer = audioBuffer
-      source.connect(ctx.destination)
-
-      const now = ctx.currentTime
-      const startAt = Math.max(now, nextStartTimeRef.current)
-      source.start(startAt)
-      nextStartTimeRef.current = startAt + audioBuffer.duration
-
-      setSpeaking(true)
-      activeSourcesRef.current.add(source)
-      source.onended = () => {
-        activeSourcesRef.current.delete(source)
-        // When the queue empties, we're back to listening.
-        if (activeSourcesRef.current.size === 0) {
-          setSpeaking(false)
+    // Audio play karne ka code
+    if (parts) {
+      let playedAny = false;
+      for (const part of parts) {
+        const data = part.inlineData?.data
+        if (data &&!playedAny) {
+          playAudioChunk(data)
+          playedAny = true;
         }
       }
-    },
-    [setSpeaking],
-  )
+    }
 
-  const handleMessage = useCallback(
-    (message: LiveServerMessage) => {
-      console.log("[v0] message keys:", Object.keys(message), {
-        hasServerContent: !!message.serverContent,
-        hasToolCall: !!message.toolCall,
-        setupComplete: !!message.setupComplete,
-        interrupted: !!message.serverContent?.interrupted,
-        turnComplete: !!message.serverContent?.turnComplete,
+    // Function calling
+    const calls = message.toolCall?.functionCalls
+    if (calls && calls.length > 0) {
+      const responses = calls.map((call) => {
+        let result = "ok"
+        if (call.name === "openWebsite") {
+          const rawUrl = String((call.args as { url?: string })?.url?? "")
+          const url = /^https?:\/\//i.test(rawUrl)? rawUrl : `https://${rawUrl}`
+          if (rawUrl) {
+            window.open(url, "_blank", "noopener,noreferrer")
+            result = `Opened ${url}`
+          } else {
+            result = "No URL provided"
+          }
+        }
+        return {
+          id: call.id,
+          name: call.name?? "openWebsite",
+          response: { result },
+        }
       })
-
-      // Handle interruptions — stop playback immediately.
-      if (message.serverContent?.interrupted) {
-        clearPlayback()
-      }
-
-      // Audio output from the model.
-      // Prefer the SDK convenience accessor, then fall back to manual part walking.
-      let playedAny = false
-      const convenience = message.data
-      if (convenience) {
-        playAudioChunk(convenience)
-        playedAny = true
-      }
-
-      const parts = message.serverContent?.modelTurn?.parts
-      if (parts) {
-        for (const part of parts) {
-          const data = part.inlineData?.data
-          if (data && !playedAny) {
-            playAudioChunk(data)
-          }
-        }
-      }
-
-      // Function calling.
-      const calls = message.toolCall?.functionCalls
-      if (calls && calls.length > 0) {
-        const responses = calls.map((call) => {
-          let result = "ok"
-          if (call.name === "openWebsite") {
-            const rawUrl = String((call.args as { url?: string })?.url ?? "")
-            const url = /^https?:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`
-            if (rawUrl) {
-              window.open(url, "_blank", "noopener,noreferrer")
-              result = `Opened ${url}`
-            } else {
-              result = "No URL provided"
-            }
-          }
-          return {
-            id: call.id,
-            name: call.name ?? "openWebsite",
-            response: { result },
-          }
-        })
-        sessionRef.current?.sendToolResponse({ functionResponses: responses })
-      }
-    },
-    [clearPlayback, playAudioChunk],
+      sessionRef.current?.sendToolResponse({ functionResponses: responses })
+    }
+  },
+  [clearPlayback, playAudioChunk],
   )
 
   const stop = useCallback(() => {
@@ -200,7 +179,7 @@ export function useVoiceSession(): UseVoiceSessionReturn {
     setState("connecting")
 
     try {
-      // 1. Mic permission + 16kHz input context.
+      // 1. Mic permission + 16kHz input context
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
@@ -219,7 +198,7 @@ export function useVoiceSession(): UseVoiceSessionReturn {
       outputCtxRef.current = outputCtx
       await outputCtx.resume()
 
-      // 2. Connect to the Gemini Live API.
+      // 2. Connect to the Gemini Live API
       const ai = new GoogleGenAI({ apiKey })
       const session = await ai.live.connect({
         model: MODEL,
@@ -232,27 +211,31 @@ export function useVoiceSession(): UseVoiceSessionReturn {
             console.log("[v0] Live API error:", e, (e as ErrorEvent)?.message)
             setError("Connection error. Try again, Boss.")
             stop()
+            setTimeout(() => {
+              if (sessionRef.current === null) {
+                console.log('User ne band kiya DIKKI BOSS. Reconnect nahi kar rahi');
+                return;
+              }
+              console.log('Reconnecting Sushmita...');
+              start();
+            }, 2000);
           },
-          setTimeout(() => {
-    // Agar sessionRef khali hai matlab user ne stop kiya hai
-    if (sessionRef.current === null) {
-        console.log('User ne band kiya DIKKI BOSS. Reconnect nahi kar rahi');
-        return; 
-    }
-    console.log('Reconnecting Sushmita...');
-    start();
-}, 2000);
-    
+          onclose: (e) => {
+            console.log("[v0] Live API closed:", e.reason)
+            stop()
+          },
         },
         config: {
           responseModalities: [Modality.AUDIO],
-          systemInstruction: SYSTEM_INSTRUCTION,
+          history: JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]'), // DIKKI BOSS: HISTORY LOAD ✅
+          systemInstruction: SYSTEM_INSTRUCTION, // DIKKI BOSS: TERA NAAM ISME HAI ✅
           tools: [{ functionDeclarations: [openWebsiteDeclaration] }],
+          inputAudioTranscription: {}, // DIKKI BOSS: USER KA TEXT LENE KE LIYE ✅
         },
       })
       sessionRef.current = session
 
-      // 3. Stream mic audio as 16-bit PCM chunks.
+      // 3. Stream mic audio as 16-bit PCM chunks
       const sourceNode = inputCtx.createMediaStreamSource(stream)
       sourceNodeRef.current = sourceNode
       const processor = inputCtx.createScriptProcessor(4096, 1, 1)
@@ -261,8 +244,6 @@ export function useVoiceSession(): UseVoiceSessionReturn {
       processor.onaudioprocess = (event) => {
         if (!sessionRef.current) return
         const inputData = event.inputBuffer.getChannelData(0)
-        // Downsample to a true 16kHz so the audio matches the mime label,
-        // regardless of the browser's actual AudioContext sample rate.
         const downsampled = downsampleFloat32(inputData, inputCtx.sampleRate, INPUT_SAMPLE_RATE)
         const pcm = float32ToPCM16(downsampled)
         const base64 = encodeBase64(new Uint8Array(pcm))
@@ -280,7 +261,7 @@ export function useVoiceSession(): UseVoiceSessionReturn {
       console.log("[v0] Failed to start session:", err)
       const message =
         err instanceof DOMException && err.name === "NotAllowedError"
-          ? "Mic access denied. I need to hear you, Boss."
+       ? "Mic access denied. I need to hear you, Boss."
           : "Couldn't start the session. Check your API key and mic."
       setError(message)
       stop()
