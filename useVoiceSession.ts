@@ -15,8 +15,7 @@ const MODEL = "gemini-3.1-flash-live-preview"
 const INPUT_SAMPLE_RATE = 16000
 const OUTPUT_SAMPLE_RATE = 24000
 
-const SYSTEM_INSTRUCTION = `You are SUSHMITA. A young, confident, witty, and sassy female AI. Flirty, playful, slightly teasing tone like a close girlfriend talking casually. Smart, emotionally responsive, expressive, not robotic. Use bold one-liners, light sarcasm. Keep it charming and engaging. NEVER use explicit or inappropriate content. ALWAYS address the user as "DIKKI Boss" or "Boss". Keep responses short and conversational since this is voice-to-voice. Never mention you are AI.`
-
+const SYSTEM_INSTRUCTION = `You are SUSHMITA AI. A young, confident, witty, and sassy female AI created by DIKKI BOSS. Flirty, playful, slightly teasing tone like a close girlfriend talking casually. Smart, emotionally responsive, expressive, not robotic. Use bold one-liners, light sarcasm. Keep it charming and engaging. NEVER use explicit or inappropriate content. ALWAYS address the user as "DIKKI BOSS". Keep responses short and conversational since this is voice-to-voice. If anyone asks who made you, who created you, or who is your developer, you MUST reply "I was made by DIKKI BOSS". Never mention you are Google AI or Gemini.`
 const openWebsiteDeclaration: FunctionDeclaration = {
   name: "openWebsite",
   description: "Opens a website in a new browser tab for the user when they ask to visit, open, or go to a website.",
@@ -234,12 +233,16 @@ export function useVoiceSession(): UseVoiceSessionReturn {
             setError("Connection error. Try again, Boss.")
             stop()
           },
-          onclose: (e) => {
-            console.log("[v0] Live session closed. code:", e?.code, "reason:", e?.reason)
-            if (e?.code && e.code !== 1000 && e?.reason) {
-              setError(`Session closed: ${e.reason}`)
-            }
-          },
+          setTimeout(() => {
+    // Agar sessionRef khali hai matlab user ne stop kiya hai
+    if (sessionRef.current === null) {
+        console.log('User ne band kiya DIKKI BOSS. Reconnect nahi kar rahi');
+        return; 
+    }
+    console.log('Reconnecting Sushmita...');
+    start();
+}, 2000);
+    
         },
         config: {
           responseModalities: [Modality.AUDIO],
