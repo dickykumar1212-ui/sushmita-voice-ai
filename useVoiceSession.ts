@@ -25,6 +25,7 @@ RULES:
 4. Ye rule todne pe error samjha jayega.
 
 START CONVERSATION NOW.`;
+
 // DIKKI BOSS: Website kholne ka function
 const openWebsiteDeclaration = {
   name: "openWebsite",
